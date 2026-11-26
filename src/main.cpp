@@ -15,6 +15,12 @@
 #include <optional>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 using namespace timetracker;
 
@@ -185,9 +191,9 @@ void showActiveTimer(TimerController& timer) {
         std::cout << error << '\n';
         return;
     }
-    std::cout << "Активная задача: " << task.name() << " (" << project.name() << ")\n"
+    std::cout << "ID задачи: " << task.id() << "\nАктивная задача: " << task.name() << " (" << project.name() << ")\n"
               << "Начало: " << formatDateTime(entry.startedAt()) << "\n"
-              << "Прошло: " << formatDuration(entry.durationSeconds()) << '\n';
+              << "Прошло: " << formatDuration(now() - entry.startedAt()) << '\n';
 }
 
 void showHistory(CsvStorage& storage) {
@@ -218,7 +224,7 @@ void showHistory(CsvStorage& storage) {
         std::cout << session.id() << " | " << record.project.name() << " / " << record.task.name()
                   << " | " << formatDateTime(session.startedAt()) << " — "
                   << formatDateTime(*session.endedAt()) << " | "
-                  << formatDuration(session.durationSeconds()) << '\n';
+                  << formatDuration(*session.durationSeconds()) << '\n';
     }
 }
 
@@ -254,7 +260,7 @@ void editSession(CsvStorage& storage) {
         return;
     }
     std::cout << "Запись " << id << " обновлена. Длительность: "
-              << formatDuration(updated.durationSeconds()) << '\n';
+              << formatDuration(*updated.durationSeconds()) << '\n';
 }
 
 bool calendarPeriod(const std::string& kind, Timestamp& start, Timestamp& end) {
@@ -285,7 +291,7 @@ bool calendarPeriod(const std::string& kind, Timestamp& start, Timestamp& end) {
     return true;
 }
 
-void createReport(CsvStorage& storage) {
+void createReport(CsvStorage& storage, std::optional<Report>& lastReport) {
     Timestamp start = 0, end = 0;
     const auto firstInput = prompt("Начало периода (YYYY-MM-DD HH:MM:SS, либо день/неделя/месяц): ");
     if (firstInput == "день" || firstInput == "неделя" || firstInput == "месяц") {
@@ -315,22 +321,32 @@ void createReport(CsvStorage& storage) {
     }
     printProjects(projects);
     const auto projectId = prompt("Фильтр по проекту (Enter — все проекты): ");
-    ReportResult result;
-    ReportService service;
-    if (!service.build(projects, tasks, sessions, start, end, projectId, result, error)) {
-        std::cout << "Не удалось построить отчет: " << error << '\n';
+    ReportService service(storage);
+    auto built = service.build({start, end}, projectId.empty() ? std::nullopt : std::optional<std::string>(projectId));
+    if (!built) {
+        std::cout << "Не удалось построить отчет: " << built.error << '\n';
         return;
     }
+    lastReport = std::move(*built.value);
+    const Report& result = *lastReport;
     std::cout << "\nОтчет за период " << formatDateTime(start) << " — " << formatDateTime(end) << '\n';
     std::cout << "Тип | ID проекта | Проект | ID задачи | Задача | Всего секунд\n";
-    for (const auto& row : result.rows) {
+    for (const auto& row : result.rows()) {
         std::cout << row.rowType << " | " << row.projectId << " | " << row.projectName << " | "
                   << row.taskId << " | " << row.taskName << " | " << row.durationSeconds << '\n';
     }
-    if (prompt("Сохранить отчет в CSV? (д/н): ") != "д") return;
+}
+
+void exportReport(CsvStorage& storage, const std::optional<Report>& lastReport) {
+    if (!lastReport) {
+        std::cout << "Сначала сформируйте отчет (пункт 8).\n";
+        return;
+    }
+    const Report& result = *lastReport;
+    std::string error;
     auto file = prompt("Путь к CSV-файлу или каталогу (Enter — data/reports): ");
     if (file.empty()) file = "data/reports";
-    std::filesystem::path exportPath(file);
+    std::filesystem::path exportPath = std::filesystem::u8path(file);
     std::error_code pathError;
     const bool pathExists = std::filesystem::exists(exportPath, pathError);
     const bool pathIsDirectory = !pathError && pathExists && std::filesystem::is_directory(exportPath, pathError);
@@ -360,14 +376,20 @@ void printMenu() {
               << "5. Остановить таймер\n"
               << "6. Показать активную сессию\n"
               << "7. История с фильтрами\n"
-              << "8. Сформировать и экспортировать отчет\n"
+              << "8. Сформировать отчет\n"
               << "9. Редактировать завершенную сессию\n"
+              << "10. Экспортировать последний сформированный отчет\n"
               << "0. Выход\n";
 }
 
 }
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    SetConsoleCP(CP_UTF8);
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+    std::optional<Report> lastReport;
     std::filesystem::path dataDirectory = argc > 1 ? argv[1] : "data";
     CsvStorage storage(dataDirectory);
     TimerController timer(storage);
@@ -395,10 +417,11 @@ int main(int argc, char* argv[]) {
             case 5: stopTimer(timer); break;
             case 6: showActiveTimer(timer); break;
             case 7: showHistory(storage); break;
-            case 8: createReport(storage); break;
+            case 8: createReport(storage, lastReport); break;
+            case 10: exportReport(storage, lastReport); break;
             case 9: editSession(storage); break;
             case 0: std::cout << "До свидания!\n"; return 0;
-            default: std::cout << "Нет такого пункта. Введите число от 0 до 9.\n"; break;
+            default: std::cout << "Нет такого пункта. Введите число от 0 до 10.\n"; break;
         }
     }
     return 0;

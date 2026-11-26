@@ -55,9 +55,23 @@ bool HistoryService::edit(const std::string& entryId, Timestamp start, Timestamp
         }
     }
     *target = candidate;
-    if (!storage_.saveSessions(sessions, error)) return false;
+    if (!storage_.saveSession(candidate, error)) return false;
     updated = candidate;
     return true;
+}
+
+Result<HistoryRowList> HistoryService::list(std::optional<std::string> projectId,
+                                         std::optional<Period> period) {
+    HistoryRowList rows; std::string error;
+    const auto from = period ? std::optional<Timestamp>(period->startUtc) : std::nullopt;
+    const auto to = period ? std::optional<Timestamp>(period->endUtc) : std::nullopt;
+    if (!list(projectId.value_or(""), from, to, rows, error)) return Result<HistoryRowList>::failure(error);
+    return Result<HistoryRowList>::success(std::move(rows));
+}
+Result<TimeEntry> HistoryService::edit(const std::string& entryId, Timestamp start, Timestamp end) {
+    TimeEntry item; std::string error;
+    if (!edit(entryId, start, end, now(), item, error)) return Result<TimeEntry>::failure(error);
+    return Result<TimeEntry>::success(std::move(item));
 }
 
 }

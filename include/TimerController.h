@@ -21,6 +21,7 @@ public:
     bool getActive(TimeEntry& entry, Task& task, Project& project, std::string& error);
 
 private:
+    Timestamp nowUtc() const;
     CsvStorage& storage_;
     std::function<Timestamp()> clock_;
 };

@@ -15,8 +15,9 @@ Timestamp TimeEntry::startedAt() const { return startedAt_; }
 const std::optional<Timestamp>& TimeEntry::endedAt() const { return endedAt_; }
 bool TimeEntry::isActive() const { return !endedAt_.has_value(); }
 
-Timestamp TimeEntry::durationSeconds() const {
-    return endedAt_ ? *endedAt_ - startedAt_ : now() - startedAt_;
+std::optional<Timestamp> TimeEntry::durationSeconds() const {
+    if (!endedAt_) return std::nullopt;
+    return *endedAt_ - startedAt_;
 }
 
 void TimeEntry::finish(Timestamp endedAt) {

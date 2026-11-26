@@ -10,6 +10,8 @@ namespace timetracker {
 TimerController::TimerController(CsvStorage& storage, std::function<Timestamp()> clock)
     : storage_(storage), clock_(std::move(clock)) {}
 
+Timestamp TimerController::nowUtc() const { return clock_(); }
+
 OperationResult TimerController::start(const std::string& taskId) {
     std::vector<Project> projects;
     std::vector<Task> tasks;
@@ -34,7 +36,7 @@ OperationResult TimerController::start(const std::string& taskId) {
     if (!projectExists) {
         return {false, "Для задачи не найден связанный проект. Проверьте файлы данных."};
     }
-    const auto startedAt = clock_();
+    const auto startedAt = nowUtc();
     for (const auto& session : sessions) {
         if (session.endedAt() && startedAt < *session.endedAt()) {
             return {false, "Текущее время раньше окончания последней сессии."};
@@ -44,10 +46,10 @@ OperationResult TimerController::start(const std::string& taskId) {
     do { id = generateUuid(); }
     while (std::any_of(sessions.begin(), sessions.end(), [&](const TimeEntry& item) { return item.id() == id; }));
     sessions.emplace_back(id, taskId, startedAt);
-    if (!storage_.saveSessions(sessions, error)) {
+    if (!storage_.saveSession(sessions.back(), error)) {
         return {false, "Не удалось сохранить сессию: " + error};
     }
-    return {true, "Учет запущен для задачи «" + task->name() + "» с " + formatDateTime(startedAt) + "."};
+    return {true, "Учет запущен для задачи «" + task->name() + "» (ID: " + task->id() + ") с " + formatDateTime(startedAt) + "."};
 }
 
 OperationResult TimerController::stop() {
@@ -64,7 +66,7 @@ OperationResult TimerController::stop() {
     if (active == sessions.end()) {
         return {false, "Активной сессии нет."};
     }
-    const auto endedAt = clock_();
+    const auto endedAt = nowUtc();
     if (endedAt <= active->startedAt()) {
         return {false, "Текущее время не позже времени начала. Сессия не остановлена."};
     }
@@ -74,10 +76,12 @@ OperationResult TimerController::stop() {
         return {false, exception.what()};
     }
     const auto duration = active->durationSeconds();
-    if (!storage_.saveSessions(sessions, error)) {
+    if (!storage_.saveSession(*active, error)) {
         return {false, "Не удалось сохранить сессию: " + error};
     }
-    return {true, "Учет остановлен. Продолжительность: " + formatDuration(duration) + "."};
+    return {true, "Учет остановлен. Начало: " + formatDateTime(active->startedAt()) +
+                  "; окончание: " + formatDateTime(endedAt) +
+                  "; продолжительность: " + formatDuration(*duration) + "."};
 }
 
 bool TimerController::getActive(TimeEntry& entry, Task& task, Project& project, std::string& error) {

@@ -146,6 +146,55 @@ bool replaceFile(const std::filesystem::path& temporary,
     return true;
 }
 
+bool validateData(const std::vector<Project>& projects, const std::vector<Task>& tasks,
+                  const std::vector<TimeEntry>& sessions, std::string& error) {
+    std::set<std::string> projectIds, taskIds, entryIds;
+    for (const auto& project : projects) {
+        if (!isUuid(project.id()) || !validName(project.name()) ||
+            !projectIds.insert(project.id()).second) {
+            error = "Файл projects.csv содержит некорректный или повторный UUID либо некорректное название.";
+            return false;
+        }
+    }
+    for (const auto& task : tasks) {
+        if (!isUuid(task.id()) || !validName(task.name()) ||
+            !taskIds.insert(task.id()).second || projectIds.count(task.projectId()) == 0) {
+            error = "Файл tasks.csv содержит некорректный или повторный UUID, название либо ссылку на отсутствующий проект.";
+            return false;
+        }
+    }
+    int activeCount = 0;
+    std::vector<const TimeEntry*> ordered;
+    for (const auto& session : sessions) {
+        if (!isUuid(session.id()) || session.startedAt() < 0 ||
+            (session.endedAt() && *session.endedAt() <= session.startedAt()) ||
+            taskIds.count(session.taskId()) == 0 ||
+            !entryIds.insert(session.id()).second) {
+            error = "Файл sessions.csv содержит некорректный или повторный UUID либо ссылку на отсутствующую задачу.";
+            return false;
+        }
+        if (session.isActive()) ++activeCount;
+        ordered.push_back(&session);
+    }
+    if (activeCount > 1) {
+        error = "Файл sessions.csv содержит более одной активной сессии.";
+        return false;
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const TimeEntry* a, const TimeEntry* b) {
+        return a->startedAt() < b->startedAt();
+    });
+    Timestamp previousEnd = -1;
+    for (const auto* session : ordered) {
+        if (session->startedAt() < previousEnd) {
+            error = "Файл sessions.csv содержит пересекающиеся сессии.";
+            return false;
+        }
+        if (session->endedAt()) previousEnd = *session->endedAt();
+        else previousEnd = std::numeric_limits<Timestamp>::max();
+    }
+    return true;
+}
+
 }
 
 CsvStorage::CsvStorage(std::filesystem::path directory) : directory_(std::move(directory)) {}
@@ -159,7 +208,9 @@ bool CsvStorage::readTable(const std::string& filename, const std::vector<std::s
         return false;
     }
     const auto path = directory_ / filename;
-    if (!std::filesystem::exists(path)) {
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec) { error = "Не удалось проверить файл: " + ec.message(); return false; }
+    if (!exists) {
         return writeTable(filename, header, {}, error);
     }
 
@@ -349,49 +400,43 @@ bool CsvStorage::saveSessions(const std::vector<TimeEntry>& items, std::string& 
 bool CsvStorage::loadAll(std::vector<Project>& projects, std::vector<Task>& tasks,
                          std::vector<TimeEntry>& sessions, std::string& error) {
     if (!loadProjects(projects, error) || !loadTasks(tasks, error) || !loadSessions(sessions, error)) return false;
-    std::set<std::string> projectIds, taskIds, entryIds;
-    for (const auto& project : projects) {
-        if (!isUuid(project.id()) || !validName(project.name()) ||
-            !projectIds.insert(project.id()).second) {
-            error = "Файл projects.csv содержит некорректный или повторный UUID либо некорректное название.";
-            return false;
-        }
-    }
-    for (const auto& task : tasks) {
-        if (!isUuid(task.id()) || !validName(task.name()) ||
-            !taskIds.insert(task.id()).second || projectIds.count(task.projectId()) == 0) {
-            error = "Файл tasks.csv содержит некорректный или повторный UUID, название либо ссылку на отсутствующий проект.";
-            return false;
-        }
-    }
-    int activeCount = 0;
-    std::vector<const TimeEntry*> ordered;
-    for (const auto& session : sessions) {
-        if (!isUuid(session.id()) || taskIds.count(session.taskId()) == 0 ||
-            !entryIds.insert(session.id()).second) {
-            error = "Файл sessions.csv содержит некорректный или повторный UUID либо ссылку на отсутствующую задачу.";
-            return false;
-        }
-        if (session.isActive()) ++activeCount;
-        ordered.push_back(&session);
-    }
-    if (activeCount > 1) {
-        error = "Файл sessions.csv содержит более одной активной сессии.";
-        return false;
-    }
-    std::sort(ordered.begin(), ordered.end(), [](const TimeEntry* a, const TimeEntry* b) {
-        return a->startedAt() < b->startedAt();
-    });
-    Timestamp previousEnd = -1;
-    for (const auto* session : ordered) {
-        if (session->startedAt() < previousEnd) {
-            error = "Файл sessions.csv содержит пересекающиеся сессии.";
-            return false;
-        }
-        if (session->endedAt()) previousEnd = *session->endedAt();
-        else previousEnd = std::numeric_limits<Timestamp>::max();
-    }
-    return true;
+    return validateData(projects, tasks, sessions, error);
+}
+
+bool CsvStorage::saveProject(const Project& item, std::string& error) {
+    std::vector<Project> projects;
+    std::vector<Task> tasks;
+    std::vector<TimeEntry> sessions;
+    if (!loadAll(projects, tasks, sessions, error)) return false;
+    auto found = std::find_if(projects.begin(), projects.end(), [&](const Project& value) { return value.id() == item.id(); });
+    if (found == projects.end()) projects.push_back(item);
+    else *found = item;
+    if (!validateData(projects, tasks, sessions, error)) return false;
+    return saveProjects(projects, error);
+}
+
+bool CsvStorage::saveTask(const Task& item, std::string& error) {
+    std::vector<Project> projects;
+    std::vector<Task> tasks;
+    std::vector<TimeEntry> sessions;
+    if (!loadAll(projects, tasks, sessions, error)) return false;
+    auto found = std::find_if(tasks.begin(), tasks.end(), [&](const Task& value) { return value.id() == item.id(); });
+    if (found == tasks.end()) tasks.push_back(item);
+    else *found = item;
+    if (!validateData(projects, tasks, sessions, error)) return false;
+    return saveTasks(tasks, error);
+}
+
+bool CsvStorage::saveSession(const TimeEntry& item, std::string& error) {
+    std::vector<Project> projects;
+    std::vector<Task> tasks;
+    std::vector<TimeEntry> sessions;
+    if (!loadAll(projects, tasks, sessions, error)) return false;
+    auto found = std::find_if(sessions.begin(), sessions.end(), [&](const TimeEntry& value) { return value.id() == item.id(); });
+    if (found == sessions.end()) sessions.push_back(item);
+    else *found = item;
+    if (!validateData(projects, tasks, sessions, error)) return false;
+    return saveSessions(sessions, error);
 }
 
 const std::filesystem::path& CsvStorage::directory() const { return directory_; }

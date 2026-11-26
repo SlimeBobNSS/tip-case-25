@@ -6,12 +6,24 @@
 
 namespace timetracker {
 
-bool ReportService::build(const std::vector<Project>& projects,
+Result<Report> ReportService::build(Period period, std::optional<std::string> projectId) const {
+    std::vector<Project> projects;
+    std::vector<Task> tasks;
+    std::vector<TimeEntry> sessions;
+    std::string error;
+    if (!storage_.loadAll(projects, tasks, sessions, error)) return Result<Report>::failure(error);
+    ReportRowList rows;
+    if (!calculate(projects, tasks, sessions, period.startUtc, period.endUtc,
+                   projectId.value_or(""), rows, error)) return Result<Report>::failure(error);
+    return Result<Report>::success(Report(std::move(rows)));
+}
+
+bool ReportService::calculate(const std::vector<Project>& projects,
                           const std::vector<Task>& tasks,
                           const std::vector<TimeEntry>& sessions,
                           Timestamp start, Timestamp end, const std::string& projectId,
-                          ReportResult& result, std::string& error) const {
-    result = {};
+                          ReportRowList& rows, std::string& error) const {
+    rows.clear();
     if (end <= start) {
         error = "Конец периода должен быть позже его начала.";
         return false;
@@ -62,14 +74,14 @@ bool ReportService::build(const std::vector<Project>& projects,
         while (index < taskRows.size() && taskRows[index].projectId == currentProject) {
             projectTotal.durationSeconds += taskRows[index].durationSeconds;
             grandTotal += taskRows[index].durationSeconds;
-            result.rows.push_back(taskRows[index++]);
+            rows.push_back(taskRows[index++]);
         }
-        result.rows.push_back(std::move(projectTotal));
+        rows.push_back(std::move(projectTotal));
     }
     ReportRow grand;
     grand.rowType = "GRAND_TOTAL";
     grand.durationSeconds = grandTotal;
-    result.rows.push_back(std::move(grand));
+    rows.push_back(std::move(grand));
     return true;
 }
 

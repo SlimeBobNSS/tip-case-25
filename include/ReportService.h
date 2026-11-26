@@ -1,37 +1,17 @@
 #pragma once
-
-#include "Project.h"
-#include "Task.h"
-#include "TimeEntry.h"
-
-#include <string>
-#include <vector>
-
+#include "CsvStorage.h"
+#include "Period.h"
+#include "Report.h"
+#include "Result.h"
 namespace timetracker {
-
-struct ReportRow {
-    std::string rowType;
-    std::string projectId;
-    std::string projectName;
-    std::string taskId;
-    std::string taskName;
-    Timestamp durationSeconds = 0;
-};
-
-struct ReportResult {
-    std::vector<ReportRow> rows;
-};
-
 class ReportService {
 public:
-    bool build(const std::vector<Project>& projects,
-               const std::vector<Task>& tasks,
-               const std::vector<TimeEntry>& sessions,
-               Timestamp start,
-               Timestamp end,
-               const std::string& projectId,
-               ReportResult& result,
-               std::string& error) const;
+    explicit ReportService(CsvStorage& storage) : storage_(storage) {}
+    Result<Report> build(Period period, std::optional<std::string> projectId = std::nullopt) const;
+private:
+    CsvStorage& storage_;
+    bool calculate(const std::vector<Project>& projects, const std::vector<Task>& tasks,
+                   const std::vector<TimeEntry>& sessions, Timestamp start, Timestamp end,
+                   const std::string& projectId, ReportRowList& rows, std::string& error) const;
 };
-
 }

@@ -1,4 +1,11 @@
 #include "ReportCsvExporter.h"
+#include "IdGenerator.h"
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include <fstream>
 #include <algorithm>
@@ -41,7 +48,7 @@ bool writeRow(std::ostream& output, const ReportRow* row) {
 ReportCsvExporter::ReportCsvExporter(std::filesystem::path dataDirectory)
     : dataDirectory_(std::move(dataDirectory)) {}
 
-bool ReportCsvExporter::write(const ReportResult& report, const std::filesystem::path& path,
+bool ReportCsvExporter::write(const Report& report, const std::filesystem::path& path,
                               std::string& error) const {
     std::error_code ec;
     const auto dataDirectory = std::filesystem::weakly_canonical(dataDirectory_, ec);
@@ -65,11 +72,16 @@ bool ReportCsvExporter::write(const ReportResult& report, const std::filesystem:
         std::filesystem::create_directories(destination.parent_path(), ec);
         if (ec) { error = "Не удалось создать каталог экспорта: " + ec.message(); return false; }
     }
-    const auto temporary = destination.string() + ".tmp";
+    auto temporary = destination;
+    temporary += "." + generateUuid() + ".tmp";
+    struct TemporaryFile {
+        std::filesystem::path path;
+        ~TemporaryFile() { std::error_code ignored; std::filesystem::remove(path, ignored); }
+    } cleanupFile{temporary};
     std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
     if (!output) { error = "Не удалось создать временный файл экспорта."; return false; }
     if (!writeRow(output, nullptr)) { error = "Ошибка записи заголовка отчёта."; return false; }
-    for (const auto& row : report.rows) {
+    for (const auto& row : report.rows()) {
         if (!writeRow(output, &row)) { error = "Ошибка записи строк отчёта."; return false; }
     }
     output.flush();
@@ -81,7 +93,15 @@ bool ReportCsvExporter::write(const ReportResult& report, const std::filesystem:
         error = "Файл назначения уже существует и не будет перезаписан.";
         return false;
     }
+#ifdef _WIN32
+    if (!MoveFileExW(temporary.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        ec = std::error_code(static_cast<int>(GetLastError()), std::system_category());
+    } else {
+        ec.clear();
+    }
+#else
     std::filesystem::create_hard_link(temporary, destination, ec);
+#endif
     if (ec) {
         std::error_code cleanup;
         std::filesystem::remove(temporary, cleanup);

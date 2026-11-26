@@ -1,4 +1,5 @@
 #include "CsvStorage.h"
+#include "IdGenerator.h"
 #include "DateTime.h"
 #include "ReportService.h"
 #include "ReportCsvExporter.h"
@@ -46,6 +47,7 @@ void testDateTime() {
 void testTimeEntry() {
     timetracker::TimeEntry entry("20000000-0000-4000-8000-000000000001", "10000000-0000-4000-8000-000000000001", 100);
     check(entry.isActive(), "new entry is active");
+    check(!entry.durationSeconds().has_value(), "active entry has no completed duration");
     entry.finish(160);
     check(!entry.isActive(), "finished entry is inactive");
     check(entry.durationSeconds() == 60, "finished duration is correct");
@@ -78,35 +80,49 @@ void testUtcStorageAndIntegrity() {
 }
 
 void testReport() {
-    const std::vector<timetracker::Project> projects{{"00000000-0000-4000-8000-000000000001", "Проект"}, {"00000000-0000-4000-8000-000000000002", "Другой"}};
-    const std::vector<timetracker::Task> tasks{{"10000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000001", "Задача"}, {"10000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000002", "Вторая"}};
-    const std::vector<timetracker::TimeEntry> sessions{
-        {"20000000-0000-4000-8000-000000000001", "10000000-0000-4000-8000-000000000001", 90, 110},
-        {"20000000-0000-4000-8000-000000000002", "10000000-0000-4000-8000-000000000001", 150, 250},
-        {"20000000-0000-4000-8000-000000000003", "10000000-0000-4000-8000-000000000001", 20, 50},
-        {"20000000-0000-4000-8000-000000000004", "10000000-0000-4000-8000-000000000001", 120}
-    };
-    timetracker::ReportService service;
-    timetracker::ReportResult result;
+    const auto directory = makeTempDirectory("report");
+    timetracker::CsvStorage storage(directory);
+    timetracker::ReportService service(storage);
     std::string error;
-    check(service.build(projects, tasks, sessions, 100, 200, "", result, error), "report builds");
-    check(result.rows.size() == 3 && result.rows[0].rowType == "TASK" &&
-          result.rows[0].durationSeconds == 60 && result.rows[1].rowType == "PROJECT_TOTAL" &&
-          result.rows[1].durationSeconds == 60 && result.rows[2].rowType == "GRAND_TOTAL" &&
-          result.rows[2].durationSeconds == 60, "report has task, project and grand totals");
-    check(service.build(projects, tasks, sessions, 100, 200, "00000000-0000-4000-8000-000000000001", result, error),
-          "report accepts an existing project filter");
-    check(result.rows.back().rowType == "GRAND_TOTAL" && result.rows.back().durationSeconds == 60,
-          "project-filtered report keeps the selected project's total");
-    check(service.build(projects, tasks, {{"20000000-0000-4000-8000-000000000001", "10000000-0000-4000-8000-000000000001", 100, 160}, {"20000000-0000-4000-8000-000000000002", "10000000-0000-4000-8000-000000000002", 160, 180}},
-                        100, 200, "", result, error), "multi-project report builds");
-    check(result.rows.size() == 5 && result.rows[0].projectName == "Другой" &&
-          result.rows[1].rowType == "PROJECT_TOTAL" && result.rows[1].durationSeconds == 20 &&
-          result.rows.back().durationSeconds == 80, "report sorts and totals without double counting");
-    check(!service.build(projects, tasks, sessions, 200, 100, "", result, error),
-          "invalid report interval rejected");
-    check(!service.build(projects, tasks, sessions, 100, 200, "missing", result, error),
-          "unknown project filter rejected");
+    const std::string p1 = "00000000-0000-4000-8000-000000000001";
+    const std::string p2 = "00000000-0000-4000-8000-000000000002";
+    const std::string t1 = "10000000-0000-4000-8000-000000000001";
+    const std::string t2 = "10000000-0000-4000-8000-000000000002";
+    check(storage.saveProjects({{p1, "Проект"}, {p2, "Другой"}}, error), "report projects saved");
+    check(storage.saveTasks({{t1, p1, "Задача"}, {t2, p2, "Вторая"}}, error), "report tasks saved");
+    check(storage.saveSessions({
+        {"20000000-0000-4000-8000-000000000001", t1, 90, 110},
+        {"20000000-0000-4000-8000-000000000002", t1, 150, 250},
+        {"20000000-0000-4000-8000-000000000003", t1, 20, 50},
+        {"20000000-0000-4000-8000-000000000004", t1, 250}
+    }, error), "report session fixture saved");
+    auto result = service.build({100, 200});
+    check(static_cast<bool>(result), "report loads storage and builds");
+    if (result) {
+        const auto& rows = result.value->rows();
+        check(rows.size() == 3 && rows[0].rowType == "TASK" && rows[0].durationSeconds == 60 &&
+              rows[1].rowType == "PROJECT_TOTAL" && rows[1].durationSeconds == 60 &&
+              rows[2].rowType == "GRAND_TOTAL" && result.value->totalSeconds() == 60,
+              "report clips intersections and sums without duplication");
+    }
+    result = service.build({100, 300}, p1);
+    check(result && result.value->totalSeconds() == 110, "active session excluded from report");
+    result = service.build({110, 150});
+    check(result && result.value->rows().size() == 1 && result.value->totalSeconds() == 0,
+          "touching boundaries do not overlap; empty report has grand total");
+    check(storage.saveSessions({
+        {"20000000-0000-4000-8000-000000000001", t1, 100, 160},
+        {"20000000-0000-4000-8000-000000000002", t2, 160, 180}
+    }, error), "multi-project fixture saved");
+    result = service.build({100, 200});
+    check(result && result.value->rows().size() == 5 &&
+          result.value->rows()[0].projectName == "Другой" && result.value->totalSeconds() == 80,
+          "report sorts and totals projects");
+    result = service.build({100, 200}, p2);
+    check(result && result.value->totalSeconds() == 20, "project filter uses fresh storage data");
+    check(!service.build({200, 100}), "invalid report interval rejected");
+    check(!service.build({100, 200}, "missing"), "unknown project filter rejected");
+    std::filesystem::remove_all(directory);
 }
 
 void testCsvStorage() {
@@ -150,8 +166,7 @@ void testCsvStorage() {
     std::vector<timetracker::Task> tasks;
     check(!storage.loadTasks(tasks, error), "invalid CSV header rejected");
     timetracker::ReportCsvExporter exporter(directory);
-    timetracker::ReportResult report;
-    report.rows.push_back({"TASK", "00000000-0000-4000-8000-000000000001", "Проект", "10000000-0000-4000-8000-000000000001", "Задача, \"А\"", 42});
+    timetracker::Report report({{"TASK", "00000000-0000-4000-8000-000000000001", "Проект", "10000000-0000-4000-8000-000000000001", "Задача, \"А\"", 42}});
     check(!exporter.write(report, directory / "projects.csv", error),
           "export cannot overwrite source CSV");
     check(exporter.write(report, directory / "report.csv", error), "new report file written");
@@ -222,6 +237,81 @@ void testTimerController() {
     std::filesystem::remove_all(directory);
 }
 
+std::string readBytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+void testSingleRecordWritesAndFailures() {
+    const auto directory = makeTempDirectory("single-write");
+    timetracker::CsvStorage storage(directory);
+    timetracker::ProjectTaskService service(storage);
+    auto project = service.createProject("  Project  ");
+    check(static_cast<bool>(project), "Result project creation succeeds");
+    if (!project) { std::filesystem::remove_all(directory); return; }
+    check(project.value->name() == "Project", "project name trimmed by service");
+    check(!service.createProject(" "), "blank name rejected");
+    check(!service.createProject("Bad\n"), "name with newline rejected");
+    auto task = service.createTask(project.value->id(), "Task");
+    check(static_cast<bool>(task), "Result task creation succeeds");
+    if (!task) { std::filesystem::remove_all(directory); return; }
+    auto projects = service.listProjects(); auto tasks = service.listTasks();
+    check(projects && projects.value->size() == 1 && tasks && tasks.value->size() == 1,
+          "separate project and task lists work");
+    std::string error;
+    timetracker::TimeEntry entry("20000000-0000-4000-8000-000000000001", task.value->id(), 100);
+    check(storage.saveSession(entry, error), "single active session inserted");
+    entry.finish(160);
+    check(storage.saveSession(entry, error), "same entry updated on stop");
+    std::vector<timetracker::TimeEntry> entries;
+    check(storage.loadSessions(entries, error) && entries.size() == 1 && entries[0].durationSeconds() == 60,
+          "single-record save does not append a duplicate");
+    const auto before = readBytes(directory / "sessions.csv");
+    check(!storage.saveSession({entry.id(), task.value->id(), 200, 100}, error), "invalid update refused");
+    check(readBytes(directory / "sessions.csv") == before, "invalid update preserves bytes");
+    std::filesystem::create_directory(directory / "sessions.csv.tmp");
+    timetracker::TimerController timer(storage, [] { return 200; });
+    check(!timer.start(task.value->id()).success, "write failure never reports timer success");
+    check(readBytes(directory / "sessions.csv") == before, "failed write preserves sessions");
+    timetracker::HistoryService history(storage);
+    check(!history.edit(entry.id(), 90, 150), "history write failure is reported");
+    check(readBytes(directory / "sessions.csv") == before, "failed edit preserves sessions");
+    std::filesystem::remove(directory / "sessions.csv.tmp");
+    std::ofstream(directory / "sessions.csv", std::ios::binary | std::ios::trunc) << "broken header\n";
+    const auto broken = readBytes(directory / "sessions.csv");
+    check(!storage.saveSession(entry, error), "corrupt CSV cannot be overwritten by single save");
+    check(!timetracker::ReportService(storage).build({0, 1000}), "report propagates corrupt storage error");
+    check(!service.createProject("Another"), "creation refuses corrupt source data");
+    check(readBytes(directory / "sessions.csv") == broken, "corrupt source preserved");
+    std::filesystem::remove_all(directory);
+}
+
+void testReportPerformance() {
+    const auto directory = makeTempDirectory("performance");
+    timetracker::CsvStorage storage(directory);
+    timetracker::ProjectTaskService service(storage);
+    auto project = service.createProject("Performance");
+    if (!project) { check(false, "performance project fixture"); return; }
+    auto task = service.createTask(project.value->id(), "Task");
+    if (!task) { check(false, "performance task fixture"); return; }
+    std::vector<timetracker::TimeEntry> sessions;
+    for (int i = 0; i < 10000; ++i) {
+        sessions.emplace_back(timetracker::generateUuid(), task.value->id(), 100 + i * 60, 160 + i * 60);
+    }
+    std::string error;
+    check(storage.saveSessions(sessions, error), "10000 session fixture saved");
+    timetracker::ReportService reports(storage);
+    for (int run = 0; run < 3; ++run) {
+        const auto started = std::chrono::steady_clock::now();
+        const auto result = reports.build({0, 31 * 86400});
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        check(result && result.value->totalSeconds() == 600000, "10000 session total correct");
+        check(seconds <= 2.0, "10000 session report completes within 2 seconds on this machine");
+        std::cout << "10000-session report #" << run + 1 << ": " << seconds << " s\n";
+    }
+    std::filesystem::remove_all(directory);
+}
+
 }
 
 int main() {
@@ -232,6 +322,8 @@ int main() {
     testCsvStorage();
     testProjectTaskAndHistoryServices();
     testTimerController();
+    testSingleRecordWritesAndFailures();
+    testReportPerformance();
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
         return 1;

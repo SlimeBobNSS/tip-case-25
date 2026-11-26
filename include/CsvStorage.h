@@ -23,6 +23,12 @@ public:
     bool loadAll(std::vector<Project>& projects, std::vector<Task>& tasks,
                  std::vector<TimeEntry>& sessions, std::string& error);
 
+    bool saveProject(const Project& item, std::string& error);
+
+    bool saveTask(const Task& item, std::string& error);
+
+    bool saveSession(const TimeEntry& item, std::string& error);
+
     const std::filesystem::path& directory() const;
 
 private:

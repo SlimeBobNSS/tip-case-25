@@ -18,7 +18,7 @@ public:
     Timestamp startedAt() const;
     const std::optional<Timestamp>& endedAt() const;
     bool isActive() const;
-    Timestamp durationSeconds() const;
+    std::optional<Timestamp> durationSeconds() const;
     void finish(Timestamp endedAt);
     void edit(Timestamp startedAt, Timestamp endedAt);
 
